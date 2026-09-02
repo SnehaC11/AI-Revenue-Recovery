@@ -188,7 +188,7 @@ Then embed them here, e.g.:
 
 ---
 
-## Demo
+<!--## Demo
 
 🎥 **5-minute walkthrough:** [Watch the RecoverAI demo](YOUR_VIDEO_LINK)
 
