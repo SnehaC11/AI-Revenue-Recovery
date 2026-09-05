@@ -283,20 +283,3 @@ RecoverAI/
     src/App.jsx        # Dashboard and API integration
     src/App.css        # Dashboard styling
 ```
-
----
-
-## Limitations and Next Steps
-
-RecoverAI is a prototype. A production version should add:
-
-- Authentication and role-based access
-- Environment-based configuration
-- Real provider integrations
-- Background jobs
-- Secure secret management
-- Database migrations
-- Observability
-- Automated tests
-- Human approval for high-impact actions
-- Payment-provider and messaging-provider integrations with confirmed settlement webhooks
