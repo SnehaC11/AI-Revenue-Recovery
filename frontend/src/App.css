@@ -527,7 +527,7 @@ header h1 {
 
 .metrics {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 15px;
     margin: 20px 0
 }
@@ -796,6 +796,23 @@ header h1 {
     background: #0c2c3d;
     color: #a6e9f9;
     font-size: 12px
+}
+
+.mini-audit>small {
+    display: block;
+    margin: 8px 0 12px;
+    font-family: "DM Mono", monospace;
+    font-size: 10px;
+    letter-spacing: .04em;
+    text-transform: uppercase
+}
+
+.audit-valid {
+    color: #7cf2b7
+}
+
+.audit-invalid {
+    color: #ff9bb3
 }
 
 .safeguards {
@@ -1453,6 +1470,10 @@ header h1 {
         grid-template-columns: repeat(2, 1fr)
     }
 
+    .metrics .metric:last-child {
+        grid-column: 1/-1
+    }
+
     .case-layout {
         grid-template-columns: 1fr
     }
@@ -1637,6 +1658,16 @@ header h1 {
     .back-button {
         padding: 9px 10px;
         font-size: 11px
+    }
+}
+
+@media(max-width:520px) {
+    .metrics {
+        grid-template-columns: 1fr
+    }
+
+    .metrics .metric:last-child {
+        grid-column: auto
     }
 }
 

@@ -1,3 +1,6 @@
+import json
+import uuid
+
 from database.models import Payment
 from services.audit import record_audit
 from services.decision_validator import validate_decision
@@ -83,12 +86,22 @@ def process_recovery_case(
             "reason": stopping["reason"],
         }
 
+    try:
+        source_context = json.loads(case.source_context or "{}")
+    except (TypeError, ValueError):
+        source_context = {}
+
     checkout_data = {
         "customer_id": case.customer_id,
         "amount_at_risk": amount_at_risk,
         "risk_score": float(case.risk_score or 0),
-        "minutes_since_abandonment": 30,
-        "payment_attempted": True,
+        "minutes_since_abandonment": source_context.get(
+            "minutes_since_abandonment", 30
+        ),
+        "payment_attempted": source_context.get(
+            "payment_attempted", False
+        ),
+        "failure_reason": source_context.get("failure_reason"),
         "payment_id": case.payment_id,
         "retry_count": retry_count,
         "recovery_type": case.recovery_type,
@@ -170,9 +183,10 @@ def process_recovery_case(
         (getattr(case, "recovery_attempts", 0) or 0)
         + 1
     )
+    case.execution_key = case.execution_key or str(uuid.uuid4())
     db.add(case)
 
-    policy = check_policy(case, action)
+    policy = check_policy(db, case, action)
     record_audit(
         db,
         case.case_id,
@@ -268,6 +282,8 @@ def process_recovery_case(
             "action": action,
             "amount_at_risk": amount_at_risk,
             "amount_recovered": amount_recovered,
+            "recovery_mode": result.get("recovery_mode", "SIMULATED"),
+            "provider_reference": result.get("provider_reference"),
         },
     )
     record_audit(
@@ -365,6 +381,7 @@ def execute_batch_recovery(
         "expected_recovery": round(expected_recovery, 2),
         "revenue_recovered": round(revenue_recovered, 2),
         "recovery_rate": round(recovery_rate, 2),
+        "recovery_mode": "DEMO_SIMULATOR",
         "results": results,
     }
 

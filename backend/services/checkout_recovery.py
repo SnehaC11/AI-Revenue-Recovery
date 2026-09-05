@@ -1,4 +1,6 @@
-from database.models import Payment
+import json
+
+from database.models import Customer, Payment, RecoveryAction
 from services.audit import record_audit
 from services.payment_simulator import retry_payment
 
@@ -24,6 +26,7 @@ def safe_checkout_decision(checkout_data):
     retry_count = int(
         checkout_data.get("retry_count", 0) or 0
     )
+    failure_reason = checkout_data.get("failure_reason")
 
     if recovery_type == "PAYMENT_FAILURE":
         if retry_count >= 2:
@@ -42,6 +45,20 @@ def safe_checkout_decision(checkout_data):
                     "High-value payment failures require finance review."
                 ),
                 "confidence": 0.92,
+            }
+
+        if failure_reason == "CARD_EXPIRED":
+            return {
+                "action": "REQUEST_PAYMENT_METHOD_UPDATE",
+                "reason": "The payment method is expired; request an update instead of retrying it.",
+                "confidence": 0.91,
+            }
+
+        if failure_reason in {"AUTHENTICATION_FAILED", "BANK_DECLINED"}:
+            return {
+                "action": "SEND_PAYMENT_LINK",
+                "reason": "The failure requires customer re-authentication or a new payment choice.",
+                "confidence": 0.84,
             }
 
         if risk >= 0.8:
@@ -151,6 +168,9 @@ def execute_checkout_recovery(
     )
 
     amount_recovered = 0.0
+    is_simulated = True
+    outcome = "SIMULATED_DISPATCHED"
+    provider_reference = f"demo-{case.execution_key or case.case_id}"
 
     if action == "RETRY_PAYMENT" and case.payment_id:
         payment = (
@@ -165,11 +185,22 @@ def execute_checkout_recovery(
                 result.get("amount_recovered", 0) or 0
             )
             db.add(payment)
+            outcome = (
+                "SIMULATED_SETTLED"
+                if amount_recovered > 0
+                else "SIMULATED_DECLINED"
+            )
     else:
         amount_recovered = calculate_checkout_recovery(
             case.amount_at_risk,
             action,
         )
+        if action.startswith("ESCALATE"):
+            outcome = "ESCALATION_QUEUED"
+        elif action in {"CLOSE_CASE", "STOP"}:
+            outcome = "NO_ACTION_REQUIRED"
+        elif amount_recovered > 0:
+            outcome = "SIMULATED_SETTLED"
 
     amount_recovered = max(0, amount_recovered)
     amount_recovered = min(
@@ -183,6 +214,42 @@ def execute_checkout_recovery(
     )
     db.add(case)
 
+    customer = (
+        db.query(Customer)
+        .filter(Customer.customer_id == case.customer_id)
+        .first()
+    )
+    contact_actions = {
+        "SEND_PAYMENT_LINK",
+        "SEND_CHECKOUT_REMINDER",
+        "REQUEST_PAYMENT_METHOD_UPDATE",
+    }
+    if action in contact_actions:
+        case.contact_attempts = (case.contact_attempts or 0) + 1
+
+    # This is the operational outbox/audit record for the action.  The demo
+    # gateway is explicit in its evidence, so it cannot be confused with a
+    # real settlement provider.
+    recovery_action = RecoveryAction(
+        case_id=case.case_id,
+        action=action,
+        result="SUCCESS" if amount_recovered > 0 else "NO_RECOVERY",
+        amount_recovered=amount_recovered,
+        action_key=f"{case.execution_key or case.case_id}:{action}",
+        channel=(customer.preferred_contact_channel if customer and action in contact_actions else None),
+        recipient=(customer.email if customer and action in contact_actions else None),
+        outcome=outcome,
+        provider_reference=provider_reference,
+        is_simulated=is_simulated,
+        evidence=json.dumps({
+            "recovery_mode": "DEMO_SIMULATOR",
+            "settlement_confirmed_by": "deterministic_demo_gateway"
+            if amount_recovered > 0 else None,
+            "action": action,
+        }, sort_keys=True),
+    )
+    db.add(recovery_action)
+
     return {
         "success": amount_recovered > 0,
         "case_id": case.case_id,
@@ -190,5 +257,7 @@ def execute_checkout_recovery(
         "reason": case.agent_reason,
         "amount_at_risk": case.amount_at_risk,
         "amount_recovered": amount_recovered,
+        "recovery_mode": "SIMULATED",
+        "provider_reference": provider_reference,
         "status": case.status,
     }

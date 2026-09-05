@@ -1,4 +1,6 @@
-from database.database import Base, SessionLocal, engine
+import json
+
+from database.database import SessionLocal
 from database.models import (
     AuditLog,
     Customer,
@@ -179,9 +181,17 @@ def seed_payments(db):
 
 def seed_cases(db):
     for item in RECOVERY_CASES:
-        db.add(RecoveryCase(**item))
+        case = dict(item)
+        case["source_event_id"] = item["case_id"]
+        case["source_context"] = json.dumps({
+            "minutes_since_abandonment": 30,
+            "payment_attempted": True,
+            "currency": "INR",
+            "seeded_demo": True,
+        }, sort_keys=True)
+        db.add(RecoveryCase(**case))
 
-    for payment_id, customer_id, amount, _, _, retry_count, _ in PAYMENTS:
+    for payment_id, customer_id, amount, status, failure_reason, retry_count, _ in PAYMENTS:
         db.add(
             RecoveryCase(
                 case_id=f"RC-{payment_id}",
@@ -196,12 +206,23 @@ def seed_cases(db):
                 ),
                 status="AT_RISK",
                 recovery_type="PAYMENT_FAILURE",
+                source_event_id=payment_id,
+                source_context=json.dumps({
+                    "failure_reason": failure_reason,
+                    "payment_status": status,
+                    "currency": "INR",
+                    "seeded_demo": True,
+                }, sort_keys=True),
             )
         )
 
 
 def main():
-    Base.metadata.create_all(bind=engine)
+    # Apply the same additive schema upgrades used by the API before a reset.
+    # This keeps `python -m data.seed_data` safe for an existing demo DB.
+    from main import ensure_schema
+
+    ensure_schema()
     db = SessionLocal()
 
     try:

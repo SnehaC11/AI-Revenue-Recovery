@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy.orm import Session
 
 from database.models import Payment, Customer, RecoveryCase
@@ -159,7 +161,15 @@ def create_recovery_cases(db: Session):
             risk_score=risk_score,
             recovery_probability=recovery_probability,
             expected_recovery=expected_recovery,
-            status="AT_RISK"
+            status="AT_RISK",
+            source_event_id=payment.payment_id,
+            source_context=json.dumps({
+                "failure_reason": payment.failure_reason,
+                "payment_status": payment.status,
+                "currency": payment.currency,
+                "payment_created_at": payment.created_at.isoformat()
+                if payment.created_at else None,
+            }, sort_keys=True),
         )
 
         db.add(case)

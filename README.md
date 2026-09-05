@@ -2,7 +2,7 @@
 
 ### AI Revenue Recovery Agent
 
-**Catches revenue before it's gone for good, and tries to win some of it back — without doing anything reckless.**
+**Catches revenue before it's gone for good, and runs a bounded recovery workflow — without doing anything reckless.**
 
 RecoverAI watches for revenue at risk, works out what's actually going on with the payment or checkout, picks a safe way to try to recover it, carries out that action, and tracks how much money actually comes back.
 
@@ -29,7 +29,7 @@ For every case, the system selects a recovery strategy, validates it against an 
 
 ---
 
-## Results
+## Demo Results
 
 The following baseline is produced by resetting the included seed data and running one recovery batch.
 
@@ -38,14 +38,15 @@ The following baseline is produced by resetting the included seed data and runni
 | Cases processed | 18 |
 | Revenue at risk | ₹558,787.00 |
 | Cases recovered | 12 |
-| Revenue recovered | ₹150,523.40 |
+| Simulated revenue recovered | ₹144,124.20 |
+| Live provider-confirmed revenue | ₹0.00 |
 | Case recovery rate | 66.67% |
-| Revenue recovery rate | 26.94% |
+| Simulated recovery rate | 25.79% |
 | Cases escalated | 4 |
 | Cases stopped | 2 |
 | Cases policy-blocked | 0 |
 
-> **Note:** Case recovery rate is cases recovered ÷ cases processed (12/18). Revenue recovery rate is revenue recovered ÷ revenue at risk (₹150,523.40 ÷ ₹558,787.00) — a lower figure because recovered cases skew toward smaller amounts.
+> **Note:** These are deterministic demo-gateway settlements, not live payment-provider collections. In production, only a provider settlement callback may populate confirmed revenue. The simulator is intentionally labelled in the UI and action evidence.
 
 ---
 
@@ -96,7 +97,7 @@ Metrics + audit trail
 - Customer and payment-context diagnosis
 - Risk score, recovery probability, and expected-recovery calculation
 - Recovery-strategy selection per recovery type
-- Bounded simulated payment retry, payment-link/reminder, close, and escalation actions
+- Bounded demo-gateway payment retry, payment-link/reminder, close, and escalation actions
 - Retry limits, workflow attempt limits, and terminal-status protection
 - Policy validation and action allow-lists
 - Case-level audit trail and recovery analytics
@@ -162,7 +163,8 @@ In contrast, high-value payment failures are escalated for finance review rather
 | Attempt limits | Stops a case after two workflow attempts. |
 | Terminal statuses | Prevents completed, stopped, escalated, or blocked cases from running again. |
 | Amount bounds | Never records more recovered revenue than the amount at risk. |
-| Audit logging | Captures the evidence behind every workflow stage. |
+| Tamper-evident audit logging | Hash-chains each case event and verifies the audit export. |
+| Contact compliance | Enforces consent/opt-out checks, a maximum of two contacts, and a 24-hour contact cooldown. |
 
 ---
 
@@ -240,7 +242,7 @@ Run this from `backend/` whenever you need a fresh demonstration:
 python -m data.seed_data
 ```
 
-This intentionally clears and reseeds the local SQLite demo database (`backend/recoverai.db`). No real payments, messages, or external recovery actions are performed.
+This intentionally clears and reseeds the local SQLite demo database (`backend/recoverai.db`). No real payments, messages, or external recovery actions are performed; displayed recovery is clearly marked as simulated.
 
 ---
 
@@ -254,10 +256,12 @@ This intentionally clears and reseeds the local SQLite demo database (`backend/r
 | `GET` | `/recovery/risk-feed` | Active priority queue. |
 | `GET` | `/recovery/{case_id}` | Returns details for one recovery case. |
 | `GET` | `/recovery/audit/{case_id}` | Returns the audit history for one case. |
+| `GET` | `/recovery/audit/{case_id}/verify` | Verifies the case audit hash chain. |
 | `POST` | `/recovery/detect` | Creates cases from failed payments. |
-| `POST` | `/recovery/detect-checkouts` | Creates checkout-abandonment cases. |
+| `POST` | `/recovery/detect-checkouts` | Creates checkout-abandonment cases from submitted checkout events. |
 | `POST` | `/recovery/batch/execute` | Processes all actionable cases. |
 | `POST` | `/recovery/cases/{case_id}/execute` | Processes one recovery case. |
+| `POST` | `/recovery/cases/{case_id}/confirm-settlement` | Records a verified, non-demo provider settlement. |
 | `POST` | `/recovery/checkout/{case_id}/execute` | Processes one checkout-abandonment case. |
 
 
@@ -295,3 +299,4 @@ RecoverAI is a prototype. A production version should add:
 - Observability
 - Automated tests
 - Human approval for high-impact actions
+- Payment-provider and messaging-provider integrations with confirmed settlement webhooks

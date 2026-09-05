@@ -1,11 +1,11 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from data.checkout_data import generate_checkout_events
 from database.database import get_db
-from database.models import AuditLog, Customer, RecoveryCase
+from database.models import AuditLog, RecoveryAction, RecoveryCase
 from services.batch_recovery import (
     execute_batch_recovery,
     process_recovery_case,
@@ -16,6 +16,9 @@ from services.checkout_recovery import (
     safe_checkout_decision,
 )
 from services.risk_engine import create_recovery_cases
+from services.audit import verify_audit_chain
+from services.execution_claim import claim_case_execution
+from services.audit import record_audit
 
 
 router = APIRouter(
@@ -29,6 +32,31 @@ TERMINAL_STATUSES = {
     "STOPPED",
     "POLICY_BLOCKED",
 }
+
+
+class SettlementConfirmation(BaseModel):
+    """A verified callback from a real payment provider, not a UI estimate."""
+
+    provider_reference: str = Field(min_length=3, max_length=255)
+    amount: float = Field(gt=0)
+    external_reference: str = Field(min_length=3, max_length=255)
+
+
+class CheckoutRiskEvent(BaseModel):
+    """An abandoned checkout supplied by the checkout system of record."""
+
+    checkout_id: str = Field(min_length=1, max_length=255)
+    customer_id: str = Field(min_length=1, max_length=255)
+    amount: float = Field(ge=0)
+    currency: str = Field(default="INR", min_length=3, max_length=3)
+    payment_attempted: bool = False
+    minutes_since_abandonment: int = Field(ge=0)
+
+
+class CheckoutRiskDetectionRequest(BaseModel):
+    """Checkout events to evaluate.  An empty request deliberately creates none."""
+
+    events: list[CheckoutRiskEvent] = Field(default_factory=list)
 
 
 @router.post("/detect")
@@ -66,7 +94,18 @@ def execute_case(
     case_id: str,
     db: Session = Depends(get_db),
 ):
-    case = _get_case_or_404(db, case_id)
+    existing_case = _get_case_or_404(db, case_id)
+    case = claim_case_execution(db, case_id)
+    if case is None:
+        return {
+            "success": False,
+            "case_id": existing_case.case_id,
+            "status": existing_case.status,
+            "amount_at_risk": existing_case.amount_at_risk,
+            "amount_recovered": existing_case.amount_recovered or 0,
+            "reason": "Recovery is already running or has already ended.",
+            "already_processed": True,
+        }
 
     result = process_recovery_case(
         db=db,
@@ -76,14 +115,7 @@ def execute_case(
         commit=True,
     )
 
-    result["already_processed"] = result["status"] in {
-        "RECOVERED",
-        "ESCALATED",
-        "STOPPED",
-        "POLICY_BLOCKED",
-    } and "already ended" in (
-        result.get("reason") or ""
-    ).lower()
+    result["already_processed"] = False
 
     return result
 
@@ -107,7 +139,13 @@ def execute_recovery_batch(
         .all()
     )
 
-    if not cases:
+    claimed_cases = []
+    for candidate in cases:
+        claimed = claim_case_execution(db, candidate.case_id)
+        if claimed is not None:
+            claimed_cases.append(claimed)
+
+    if not claimed_cases:
         return {
             "cases_processed": 0,
             "recovered_cases": 0,
@@ -122,7 +160,7 @@ def execute_recovery_batch(
 
     return execute_batch_recovery(
         db=db,
-        cases=cases,
+        cases=claimed_cases,
         decision_function=safe_checkout_decision,
         execute_function=execute_checkout_recovery,
     )
@@ -136,12 +174,13 @@ def get_case_audit(
     logs = (
         db.query(AuditLog)
         .filter(AuditLog.case_id == case_id)
-        .order_by(AuditLog.timestamp.asc())
+        .order_by(AuditLog.id.asc())
         .all()
     )
 
     return {
         "case_id": case_id,
+        "integrity": verify_audit_chain(logs),
         "events": [
             {
                 "event": log.event,
@@ -149,9 +188,28 @@ def get_case_audit(
                     log.details
                 ),
                 "created_at": log.timestamp,
+                "previous_hash": log.previous_hash,
+                "event_hash": log.event_hash,
             }
             for log in logs
         ],
+    }
+
+
+@router.get("/audit/{case_id}/verify")
+def verify_case_audit(
+    case_id: str,
+    db: Session = Depends(get_db),
+):
+    logs = (
+        db.query(AuditLog)
+        .filter(AuditLog.case_id == case_id)
+        .order_by(AuditLog.id.asc())
+        .all()
+    )
+    return {
+        "case_id": case_id,
+        "integrity": verify_audit_chain(logs),
     }
 
 
@@ -203,16 +261,16 @@ def get_risk_feed(
 
 @router.post("/detect-checkouts")
 def detect_checkouts(
+    request: CheckoutRiskDetectionRequest | None = None,
     db: Session = Depends(get_db),
 ):
-    customers = (
-        db.query(Customer)
-        .limit(500)
-        .all()
+    # Detection must only persist events received from the checkout system.
+    # Previously this endpoint generated 100 random demo events for every
+    # request, causing a dashboard click to create 100 active cases.
+    cases = create_checkout_cases(
+        db,
+        [event.model_dump() for event in (request.events if request else [])],
     )
-
-    events = generate_checkout_events(customers)
-    cases = create_checkout_cases(db, events)
 
     return {
         "detected": len(cases),
@@ -266,12 +324,15 @@ def execute_checkout_case(
             "already_processed": True,
         }
 
-    if case.status == "RECOVERY_RUNNING":
+    case = claim_case_execution(db, case_id)
+    if case is None:
+        current = _get_case_or_404(db, case_id)
         return {
             "success": False,
-            "case_id": case.case_id,
-            "status": "RECOVERY_RUNNING",
+            "case_id": current.case_id,
+            "status": current.status,
             "reason": "Recovery is already being executed.",
+            "already_processed": True,
         }
 
     result = process_recovery_case(
@@ -323,6 +384,64 @@ def get_case_detail(
         "selected_action": case.selected_action,
         "agent_reason": case.agent_reason,
         "confidence": getattr(case, "confidence", 0) or 0,
+    }
+
+
+@router.post("/cases/{case_id}/confirm-settlement")
+def confirm_settlement(
+    case_id: str,
+    confirmation: SettlementConfirmation,
+    db: Session = Depends(get_db),
+):
+    """Accept only a provider-confirmed collection as real recovered money."""
+    case = _get_case_or_404(db, case_id)
+    if confirmation.amount > float(case.amount_at_risk or 0):
+        raise HTTPException(
+            status_code=422,
+            detail="Confirmed amount cannot exceed the amount at risk.",
+        )
+
+    action = (
+        db.query(RecoveryAction)
+        .filter(
+            RecoveryAction.case_id == case_id,
+            RecoveryAction.provider_reference == confirmation.provider_reference,
+        )
+        .first()
+    )
+    if action is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No recovery action matches this provider reference.",
+        )
+    if action.is_simulated:
+        raise HTTPException(
+            status_code=409,
+            detail="Demo-gateway actions cannot be confirmed as live settlements.",
+        )
+
+    action.amount_recovered = confirmation.amount
+    action.outcome = "CONFIRMED_SETTLED"
+    action.result = "SUCCESS"
+    action.evidence = json.dumps({
+        "provider_reference": confirmation.provider_reference,
+        "external_reference": confirmation.external_reference,
+        "confirmation_type": "provider_callback",
+    }, sort_keys=True)
+    case.amount_recovered = confirmation.amount
+    case.status = "RECOVERED"
+    db.add_all([action, case])
+    record_audit(db, case.case_id, "SETTLEMENT_CONFIRMED", {
+        "amount_recovered": confirmation.amount,
+        "provider_reference": confirmation.provider_reference,
+        "external_reference": confirmation.external_reference,
+    })
+    db.commit()
+    return {
+        "case_id": case.case_id,
+        "status": case.status,
+        "confirmed_amount": confirmation.amount,
+        "provider_reference": confirmation.provider_reference,
     }
 
 

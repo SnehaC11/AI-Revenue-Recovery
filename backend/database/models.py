@@ -22,6 +22,12 @@ class Customer(Base):
 
     failed_payments = Column(Integer, default=0)
 
+    # Recovery communications are opt-in by default only for the local demo.
+    # Production ingestion must set these from the system of record.
+    recovery_consent = Column(Boolean, default=True, nullable=False)
+    contact_opt_out = Column(Boolean, default=False, nullable=False)
+    preferred_contact_channel = Column(String, default="EMAIL")
+
 
 class Payment(Base):
 
@@ -86,6 +92,13 @@ class RecoveryCase(Base):
 
     recovery_type = Column(String, default="PAYMENT_FAILURE")
 
+    # Snapshot of the source signal used for the decision.  Retaining it makes
+    # a later audit reproducible even if the upstream event changes.
+    source_event_id = Column(String, unique=True, nullable=True)
+    source_context = Column(String, default="{}")
+    contact_attempts = Column(Integer, default=0, nullable=False)
+    execution_key = Column(String, unique=True, nullable=True)
+
 
 class RecoveryAction(Base):
 
@@ -100,6 +113,14 @@ class RecoveryAction(Base):
     result = Column(String)
 
     amount_recovered = Column(Float, default=0)
+
+    action_key = Column(String, unique=True, index=True)
+    channel = Column(String, nullable=True)
+    recipient = Column(String, nullable=True)
+    outcome = Column(String, default="PENDING")
+    provider_reference = Column(String, nullable=True)
+    is_simulated = Column(Boolean, default=True, nullable=False)
+    evidence = Column(String, default="{}")
 
     timestamp = Column(DateTime, default=datetime.utcnow)
 
@@ -117,6 +138,11 @@ class AuditLog(Base):
     details = Column(String)
 
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+    # Append-only application audit chain.  Each event commits to the prior
+    # event for the same case, making edits or removals detectable on export.
+    previous_hash = Column(String, nullable=True)
+    event_hash = Column(String, unique=True, index=True, nullable=True)
 
     @property
     def event_type(self):

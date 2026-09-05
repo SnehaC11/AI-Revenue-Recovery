@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from database.database import get_db
-from database.models import RecoveryCase
+from database.models import RecoveryAction, RecoveryCase
 
 
 router = APIRouter(
@@ -34,6 +34,16 @@ def get_revenue_metrics(
     revenue_recovered = sum(
         float(case.amount_recovered or 0)
         for case in cases
+    )
+    simulated_revenue_recovered = sum(
+        float(action.amount_recovered or 0)
+        for action in db.query(RecoveryAction).all()
+        if action.is_simulated and action.outcome == "SIMULATED_SETTLED"
+    )
+    confirmed_revenue_recovered = sum(
+        float(action.amount_recovered or 0)
+        for action in db.query(RecoveryAction).all()
+        if not action.is_simulated and action.outcome == "CONFIRMED_SETTLED"
     )
     expected_recovery = sum(
         float(case.expected_recovery or 0)
@@ -92,6 +102,12 @@ def get_revenue_metrics(
             2,
         ),
         "revenue_recovered": round(revenue_recovered, 2),
+        "simulated_revenue_recovered": round(
+            simulated_revenue_recovered, 2
+        ),
+        "confirmed_revenue_recovered": round(
+            confirmed_revenue_recovered, 2
+        ),
         "expected_recovery": round(expected_recovery, 2),
         "recovery_rate": round(recovery_rate, 2),
         "total_cases": len(cases),

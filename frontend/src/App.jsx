@@ -80,7 +80,7 @@ function auditSummary(event) {
   if (eventType === "RECOVERY_ACTION")
     return `Started ${action}${amount ? ` for ${amount}` : ""}.`;
   if (eventType === "RECOVERY_RESULT")
-    return `${label(details.status)} outcome recorded${details.amount_recovered ? ` with ${money(details.amount_recovered)} recovered` : ""}.`;
+    return `${label(details.status)} outcome recorded${details.amount_recovered ? ` with ${money(details.amount_recovered)} ${details.recovery_mode === "SIMULATED" ? "simulated" : "confirmed"} recovery` : ""}.`;
   if (eventType === "WORKFLOW_STOPPED")
     return `Workflow stopped: ${label(details.reason)}.`;
   return Object.entries(details)
@@ -92,6 +92,8 @@ export default function App() {
   const [metrics, setMetrics] = useState({
     revenue_at_risk: 0,
     revenue_recovered: 0,
+    simulated_revenue_recovered: 0,
+    confirmed_revenue_recovered: 0,
     expected_recovery: 0,
     recovery_rate: 0,
     total_cases: 0,
@@ -104,6 +106,7 @@ export default function App() {
   const [feed, setFeed] = useState([]);
   const [selected, setSelected] = useState(null);
   const [events, setEvents] = useState([]);
+  const [auditIntegrity, setAuditIntegrity] = useState(null);
   const [view, setView] = useState("overview");
   const [history, setHistory] = useState([]);
   const [filter, setFilter] = useState("ALL");
@@ -137,8 +140,25 @@ export default function App() {
     try {
       const response = await axios.get(`${API}/recovery/audit/${item.case_id}`);
       setEvents(response.data.events || []);
+      setAuditIntegrity(response.data.integrity || null);
     } catch {
       setEvents([]);
+      setAuditIntegrity(null);
+    }
+  }
+  async function detectRisk() {
+    try {
+      setRunning(true);
+      setNotice("Detecting new payment revenue risk...");
+      const payments = await axios.post(`${API}/recovery/detect`);
+      setNotice(
+        `Detection complete: ${payments.data.cases_created || 0} new payment cases available.`,
+      );
+      await refresh();
+    } catch {
+      setNotice("Risk detection could not run. Check that the backend is online.");
+    } finally {
+      setRunning(false);
     }
   }
   async function runBatch() {
@@ -194,7 +214,9 @@ export default function App() {
 
   const filtered = cases.filter(
     (item) =>
-      (filter === "ALL" || item.status === filter) &&
+      (filter === "ALL" ||
+        (filter === "ACTIVE" && !terminalStatuses.has(item.status)) ||
+        item.status === filter) &&
       (!query ||
         [
           item.case_id,
@@ -351,8 +373,15 @@ export default function App() {
                     )}
                   </button>
                   <button
+                    className="secondary"
+                    onClick={detectRisk}
+                    disabled={running}
+                  >
+                    <Search size={16} /> Detect new risk
+                  </button>
+                  <button
                     className="hero-link"
-                    onClick={() => filterCases("AT_RISK")}
+                    onClick={() => filterCases("ACTIVE")}
                   >
                     Review active cases <ChevronRight size={16} />
                   </button>
@@ -361,7 +390,7 @@ export default function App() {
               <div className="ring">
                 <div>
                   <strong>{rate.toFixed(1)}%</strong>
-                  <small>recovered</small>
+                  <small>demo recovery</small>
                 </div>
                 <em>Recovery rate</em>
               </div>
@@ -373,13 +402,21 @@ export default function App() {
                 text="Open exposure"
                 icon={<AlertTriangle />}
                 tone="amber"
-                click={() => filterCases("AT_RISK")}
+                click={() => filterCases("ACTIVE")}
               />
               <Metric
-                title="Recovered"
-                value={money(metrics.revenue_recovered)}
-                text={`${metrics.recovered_cases || 0} successful cases`}
+                title="Simulated recovered"
+                value={money(metrics.simulated_revenue_recovered)}
+                text={`${metrics.recovered_cases || 0} demo-settled cases`}
                 icon={<DollarSign />}
+                tone="green"
+                click={() => filterCases("RECOVERED")}
+              />
+              <Metric
+                title="Live confirmed"
+                value={money(metrics.confirmed_revenue_recovered)}
+                text="Provider-settlement callbacks"
+                icon={<CheckCircle2 />}
                 tone="green"
                 click={() => filterCases("RECOVERED")}
               />
@@ -389,7 +426,7 @@ export default function App() {
                 text="Needs a decision"
                 icon={<Clock3 />}
                 tone="blue"
-                click={() => filterCases("AT_RISK")}
+                click={() => filterCases("ACTIVE")}
               />
               <Metric
                 title="Escalations"
@@ -405,7 +442,7 @@ export default function App() {
                 <p className="eyebrow">HOW RECOVERAI WORKS</p>
                 <h2>From revenue signal to accountable outcome.</h2>
               </div>
-              <button onClick={() => filterCases("AT_RISK")}>
+              <button onClick={() => filterCases("ACTIVE")}>
                 <b>01</b>
                 <span>
                   <strong>Detect</strong>
@@ -449,13 +486,13 @@ export default function App() {
                     value={money(metrics.expected_recovery)}
                   />
                   <Stat
-                    text="Recovered"
-                    value={money(metrics.revenue_recovered)}
+                    text="Simulated"
+                    value={money(metrics.simulated_revenue_recovered)}
                   />
                 </div>
                 <div className="safe">
                   <ShieldCheck size={18} />
-                  Every recovery is constrained by policy and stopping rules.
+                  Demo settlements are explicitly simulated; production totals require provider confirmation.
                 </div>
               </div>
               <div className="panel safeguards">
@@ -467,7 +504,7 @@ export default function App() {
                   <CheckCircle2 /> Duplicate execution protection
                 </p>
                 <p>
-                  <CheckCircle2 /> Immutable audit events
+                  <CheckCircle2 /> Tamper-evident audit events
                 </p>
                 <button onClick={() => filterCases("ALL")}>
                   Review recovery cases <ChevronRight size={15} />
@@ -563,6 +600,7 @@ export default function App() {
                     onChange={(e) => setFilter(e.target.value)}
                   >
                     <option value="ALL">All statuses</option>
+                    <option value="ACTIVE">Active</option>
                     <option value="AT_RISK">At risk</option>
                     <option value="RECOVERED">Recovered</option>
                     <option value="ESCALATED">Escalated</option>
@@ -589,13 +627,15 @@ export default function App() {
                 )}
               </div>
             </div>
-            <Inspector
-              item={selected}
-              events={events}
-              close={() => {
-                setSelected(null);
-                setEvents([]);
-              }}
+              <Inspector
+                item={selected}
+                events={events}
+                integrity={auditIntegrity}
+                close={() => {
+                  setSelected(null);
+                  setEvents([]);
+                  setAuditIntegrity(null);
+                }}
               execute={execute}
             />
           </section>
@@ -766,7 +806,7 @@ function CaseRow({ item, selected, click }) {
     </button>
   );
 }
-function Inspector({ item, events, close, execute }) {
+function Inspector({ item, events, integrity, close, execute }) {
   if (!item)
     return (
       <aside className="panel inspector empty-inspector">
@@ -779,7 +819,7 @@ function Inspector({ item, events, close, execute }) {
       </aside>
     );
   const recoveryType = item.recovery_type || item.type;
-  const canRun = item.status === "AT_RISK";
+  const canRun = item.status === "AT_RISK" || item.status === "OPEN";
   const decision = decisionFor(item);
   const confidence = Number.isFinite(decision.confidence)
     ? `${Math.round(decision.confidence * 100)}% confidence`
@@ -826,6 +866,13 @@ function Inspector({ item, events, close, execute }) {
         <strong>
           <ShieldCheck size={16} /> Audit events
         </strong>
+        {integrity && (
+          <small className={integrity.valid ? "audit-valid" : "audit-invalid"}>
+            {integrity.valid
+              ? `Integrity verified · ${integrity.events_verified} events`
+              : "Integrity check failed"}
+          </small>
+        )}
         <Timeline events={events} compact />
       </div>
     </aside>
